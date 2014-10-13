@@ -202,26 +202,29 @@ Sloan::execute()
 
 	BoolVectorH counted(m_n, false);
 	int tmp_wf = 0;
-	for (int i = 0; i < m_n; i++) {
-		int start_idx = tmp_row_offsets[i], end_idx = tmp_row_offsets[i+1];
 
-		if (!counted[i]) {
-			tmp_wf ++;
-			counted[i] = true;
+	{
+		for (int i = 0; i < m_n; i++) {
+			int start_idx = tmp_row_offsets[i], end_idx = tmp_row_offsets[i+1];
+
+			if (!counted[i]) {
+				tmp_wf ++;
+				counted[i] = true;
+			}
+
+			for (int l = start_idx; l < end_idx; l++) {
+				int column = tmp_column_indices[l];
+				if (column <= i || counted[column]) continue;
+				counted[column] = true;
+				tmp_wf ++;
+			}
+
+			m_ori_rmswf += 1.0 * tmp_wf * tmp_wf;
+
+			tmp_wf --;
 		}
-
-		for (int l = start_idx; l < end_idx; l++) {
-			int column = tmp_column_indices[l];
-			if (column <= i || counted[column]) continue;
-			counted[column] = true;
-			tmp_wf ++;
-		}
-
-		m_ori_rmswf += 1.0 * tmp_wf * tmp_wf;
-
-		tmp_wf --;
+		m_ori_rmswf = sqrt(m_ori_rmswf / m_n);
 	}
-	m_ori_rmswf = sqrt(m_ori_rmswf / m_n);
 
 	unorderedBFS(tmp_reordering,
 				 tmp_row_offsets,
@@ -235,31 +238,34 @@ Sloan::execute()
 					thrust::make_counting_iterator(int(m_n)),
 					tmp_reordering.begin(),
 					tmp_perm.begin());
-	thrust::fill(counted.begin(), counted.end(), false);
 
-	tmp_wf = 0;
-	for (int i = 0; i < m_n; i++) {
-		int row = tmp_reordering[i];
-		int start_idx = tmp_row_offsets[row], end_idx = tmp_row_offsets[row+1];
+	{
+		thrust::fill(counted.begin(), counted.end(), false);
 
-		if (!counted[row]) {
-			tmp_wf ++;
-			counted[row] = true;
+		tmp_wf = 0;
+		for (int i = 0; i < m_n; i++) {
+			int row = tmp_reordering[i];
+			int start_idx = tmp_row_offsets[row], end_idx = tmp_row_offsets[row+1];
+
+			if (!counted[row]) {
+				tmp_wf ++;
+				counted[row] = true;
+			}
+
+			for (int l = start_idx; l < end_idx; l++) {
+				int column  = tmp_column_indices[l];
+				int new_pos = tmp_perm[column];
+				if (new_pos <= i || counted[column]) continue;
+				counted[column] = true;
+				tmp_wf ++;
+			}
+
+			m_rmswf += 1.0 * tmp_wf * tmp_wf;
+
+			tmp_wf --;
 		}
-
-		for (int l = start_idx; l < end_idx; l++) {
-			int column  = tmp_column_indices[l];
-			int new_pos = tmp_perm[column];
-			if (new_pos <= i || counted[column]) continue;
-			counted[column] = true;
-			tmp_wf ++;
-		}
-
-		m_rmswf += 1.0 * tmp_wf * tmp_wf;
-
-		tmp_wf --;
+		m_rmswf = sqrt(m_rmswf / m_n);
 	}
-	m_rmswf = sqrt(m_rmswf / m_n);
 }
 
 void
@@ -514,7 +520,6 @@ Sloan::unorderedBFSIteration(int            width,
 		pS = S;
 		S  = E;
 	}
-	thrust::copy(tmp_reordering.begin() + start_idx, tmp_reordering.begin() + end_idx, tmp_reordering_bak.begin());
 
 	const int W1 = 2, W2 = 1;
 
@@ -523,22 +528,29 @@ Sloan::unorderedBFSIteration(int            width,
 
 	thrust::scatter(costs.begin() + start_idx, costs.begin() + end_idx, tmp_reordering.begin() + start_idx, ori_costs.begin());
 
-	std::priority_queue<IntPair> pq;
+	int head = 0, tail = 1;
+	tmp_reordering_bak[0] = S;
 	status[S] = PREACTIVE;
-	pq.push(thrust::make_tuple(ori_costs[S],S));
+	//// pq.push(thrust::make_tuple(ori_costs[S],S));
 
 	int cur_idx = start_idx;
 
-	while(!pq.empty()) {
-		int cur_node;
-		while(!pq.empty()) {
-			IntPair tmp = pq.top(); pq.pop();
-			cur_node = thrust::get<1>(tmp);
-			if (status[cur_node] != POSTACTIVE)
-				break;
+	while(head < tail) {
+		int cur_node = tmp_reordering_bak[head];
+		int max_cost = ori_costs[cur_node];
+		int idx = head;
+
+		{
+			for (int i = head + 1; i < tail; i++)
+				if (max_cost < ori_costs[tmp_reordering_bak[i]]) {
+					idx = i;
+					cur_node = tmp_reordering_bak[i];
+					max_cost = ori_costs[cur_node + start_idx];
+				}
 		}
-		status[cur_node] = POSTACTIVE;
-		tmp_reordering[cur_idx ++] = cur_node;
+
+		if (idx != head) 
+			tmp_reordering_bak[idx] = tmp_reordering_bak[head];
 
 		if (status[cur_node] == PREACTIVE) {
 			int start_idx2 = row_offsets[cur_node], end_idx2 = row_offsets[cur_node + 1];
@@ -547,12 +559,17 @@ Sloan::unorderedBFSIteration(int            width,
 				int column = column_indices[l];
 				if (status[column] == POSTACTIVE) continue;
 				ori_costs[column] += W1;
-				pq.push(thrust::make_tuple(ori_costs[column], column));
-
-				if (status[column] == INACTIVE)
+				//// pq.push(thrust::make_tuple(ori_costs[column], column));
+				if (status[column] == INACTIVE) {
+					tmp_reordering_bak[tail] = column;
 					status[column] = PREACTIVE;
+					tail ++;
+				}
 			}
 		}
+
+		status[cur_node] = POSTACTIVE;
+		tmp_reordering[cur_idx ++] = cur_node;
 
 		int start_idx2 = row_offsets[cur_node], end_idx2 = row_offsets[cur_node + 1];
 
@@ -560,20 +577,25 @@ Sloan::unorderedBFSIteration(int            width,
 			int column = column_indices[l];
 			if (status[column] != PREACTIVE) continue;
 			ori_costs[column] += W1;
-			pq.push(thrust::make_tuple(ori_costs[column], column));
+			status[column] = ACTIVE;
+			//// pq.push(thrust::make_tuple(ori_costs[column], column));
 
-			int start_idx3 = row_offsets[column], end_idx3 = row_offsets[column];
+			int start_idx3 = row_offsets[column], end_idx3 = row_offsets[column + 1];
 
 			for (int l2 = start_idx3; l2 < end_idx3; l2++) {
 				int column2 = column_indices[l2];
 				if (status[column2] == POSTACTIVE) continue;
 
 				ori_costs[column2] += W1;
-				pq.push(thrust::make_tuple(ori_costs[column2], column2));
-				if (status[column2] == INACTIVE)
+				//// pq.push(thrust::make_tuple(ori_costs[column2], column2));
+				if (status[column2] == INACTIVE) {
 					status[column2] = PREACTIVE;
+					tmp_reordering_bak[tail] = column2;
+					tail ++;
+				}
 			}
 		}
+		head++;
 	}
 }
 
